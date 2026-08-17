@@ -1,0 +1,12 @@
+[submodule "third_part/CrispASR"]
+	path = third_part/CrispASR
+	url = https://github.com/lijunjie2232/CrispASR-NB
+	branch = main
+[submodule "third_part/cuda_fix"]
+	path = third_part/cuda_fix
+	url = https://github.com/lijunjie2232/cuda_patch
+	branch = master
+[submodule "third_part/FunASR"]
+	path = third_part/FunASR
+	url = https://github.com/modelscope/FunASR
+	branch = main
