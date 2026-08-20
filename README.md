@@ -347,6 +347,12 @@ Speaker Inversion trains only a small set of speaker embedding tokens while keep
 base Irodori-TTS model frozen. It is useful when you want a reusable speaker identity
 checkpoint instead of providing reference audio at every inference call.
 
+See the [Speaker Inversion guide](SPEAKER_INVERSION.md) for the full workflow, tuning advice,
+and troubleshooting. A ready-to-run example workspace with template configs and scripts is
+provided at [`speaker_inversion_example/`](speaker_inversion_example/), and a Simplified
+Chinese translation of the guide is available at
+[`SPEAKER_INVERSION_zh.md`](SPEAKER_INVERSION_zh.md).
+
 Prepare a manifest from the target speaker's audio, then initialize from v4-Small:
 
 ```bash
