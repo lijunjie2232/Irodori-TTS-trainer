@@ -1,0 +1,103 @@
+# Speaker Inversion training config for the legacy Irodori-TTS-500M-v3 base.
+#
+# Use this instead of configs/speaker_inversion.yaml when your base checkpoint is a
+# v3 release (for example Aratako/Irodori-TTS-500M-v3.safetensors). Architecture
+# fields must match that checkpoint.
+#
+# Run it with:
+#   uv run --no-sync python train.py \
+#     --config speaker_inversion_example/configs/speaker_inversion_v3_500m.yaml \
+#     --manifest speaker_inversion_example/data/target_speaker_manifest.jsonl \
+#     --init-checkpoint path/to/Irodori-TTS-500M-v3.safetensors \
+#     --output-dir speaker_inversion_example/outputs/my_speaker_v3
+
+model:
+  latent_dim: 32
+  latent_patch_size: 1
+  text_vocab_size: 99574
+  text_tokenizer_repo: llm-jp/llm-jp-3-150m
+  model_dim: 1280
+  num_layers: 12
+  num_heads: 20
+  mlp_ratio: 2.875
+  text_mlp_ratio: 2.6
+  speaker_mlp_ratio: 2.6
+  text_dim: 512
+  text_layers: 10
+  text_heads: 8
+  speaker_dim: 768
+  speaker_layers: 8
+  speaker_heads: 12
+  speaker_patch_size: 1
+  timestep_embed_dim: 512
+  adaln_rank: 192
+  use_speaker_condition: true      # REQUIRED: Speaker Inversion needs the speaker branch.
+  use_duration_predictor: true
+  duration_aux_dim: 14
+  duration_hidden_dim: 1024
+  duration_layers: 3
+  duration_dropout: 0.1
+  duration_attention_heads: 8
+  duration_architecture: token_sum_adarn_zero_no_aux
+  duration_token_init_frames: 9.0
+  duration_speaker_fusion: adarn_zero
+
+train:
+  train_mode: rf                   # REQUIRED: only 'rf' is supported for Speaker Inversion.
+
+  # ---- Speaker Inversion settings ------------------------------------------
+  speaker_inversion_enabled: true
+  speaker_inversion_tokens: 16
+  speaker_inversion_init_std: 0.02
+  speaker_inversion_init_embedding:
+  # --------------------------------------------------------------------------
+
+  batch_size: 16
+  gradient_accumulation_steps: 1
+  num_workers: 8
+  dataloader_persistent_workers: true
+  dataloader_prefetch_factor: 4
+  allow_tf32: true
+  compile_model: false
+  gradient_checkpointing: true
+  precision: bf16
+
+  optimizer: adamw                 # REQUIRED: adamw, not muon.
+  learning_rate: 0.01
+  weight_decay: 0.0
+  adam_beta1: 0.9
+  adam_beta2: 0.999
+  adam_eps: 0.00000001
+  lr_scheduler: none
+  max_steps: 3000
+
+  max_text_len: 256
+
+  # Keep every condition dropout at 0.0 (see SPEAKER_INVERSION.md section 4).
+  text_condition_dropout: 0.0
+  speaker_condition_dropout: 0.0
+  caption_condition_dropout: 0.0
+  duration_speaker_dropout: 0.0
+
+  timestep_stratified: true
+  max_latent_steps: 750
+  fixed_target_latent_steps:
+  fixed_target_full_mask: false
+  rf_loss_mode: utterance_mean
+
+  duration_loss_weight: 0.1
+  duration_huber_delta: 0.1
+
+  log_every: 20
+  save_every: 250
+  checkpoint_best_n: 0
+  valid_ratio: 0.0
+  valid_every: 0
+
+  wandb_enabled: false
+  wandb_project:
+  wandb_entity:
+  wandb_run_name:
+  wandb_mode: online
+  ddp_find_unused_parameters: false
+  seed: 0

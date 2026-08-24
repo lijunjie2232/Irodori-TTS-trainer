@@ -219,3 +219,9 @@ gradio_outputs/
 gradio_outputs_voicedesign/
 outputs/
 data/
+
+# The Speaker Inversion example workspace ships a manifest template under its own
+# data/ directory. Re-include that directory and template only; generated latents,
+# real manifests, and outputs stay ignored.
+speaker_inversion_example/data
+!speaker_inversion_example/data/speaker-inversion-dataset

@@ -1,0 +1,24 @@
+# Evaluation texts for the trained Speaker Inversion embedding.
+#
+# Lines starting with '#' are comments. scripts/04_eval_snapshots.sh reads the
+# first non-comment line by default, or any line you select with LINE=<n>.
+#
+# Pick text that is NOT in your training manifest. If the voice holds up on
+# unseen sentences, the embedding generalised rather than memorised.
+
+# --- short, plain read speech
+こんにちは、これは学習した話者埋め込みを使った推論です。
+おはようございます。今日も一日よろしくお願いします。
+これは話者反転で学習した声が、初めて聞く文章でも安定しているかを確認するためのテストです。
+
+# --- longer sentence, tests prosody and phrasing
+新しい技術を学ぶときは、まず小さく試して、うまくいったら少しずつ広げていくのが結局いちばん早いんだよね。
+
+# --- numbers, punctuation, and text normalisation
+明日の会議は午後三時からです。資料を十部印刷しておいてください。
+
+# --- emoji style control (only meaningful if your base model supports it)
+あははっ🤭、それ本当に言ってるの？…😮‍💨まぁ、君らしいけどね。
+
+# --- a deliberately different register, to probe how far the identity stretches
+えっ、ちょっと待って。今の話、もう一回最初から説明してもらえる？
