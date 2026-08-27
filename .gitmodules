@@ -10,3 +10,6 @@
 	path = third_part/FunASR
 	url = https://github.com/modelscope/FunASR
 	branch = main
+[submodule "speaker_inversion_example/data/speaker-inversion-dataset"]
+	path = speaker_inversion_example/data/speaker-inversion-dataset
+	url = git@hf.co:datasets/l2533584225/Inversion-speaker-dataset
