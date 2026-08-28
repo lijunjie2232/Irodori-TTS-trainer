@@ -1,9 +1,11 @@
 # Generated artifacts from this example workspace - not meant to be committed.
-data/latents/
-data/target_speaker_manifest.jsonl
+data/*
 outputs/
 *.wav
 
 # Keep the templates themselves even though the rules above are broad.
 !data/manifest.example.jsonl
-!texts/eval_texts.txt
+
+
+!data/speaker-inversion-dataset/*.py
+!data/speaker-inversion-dataset/*.ipynb
