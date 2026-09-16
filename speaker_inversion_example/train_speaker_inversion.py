@@ -19,8 +19,8 @@ What this script does, in order:
    encodes what is new since the last conversion
 6. verifies the manifest against the latents on disk, then pushes `converted/` back to the
    dataset repo
-7. runs Speaker Inversion training — single process on 1 GPU, DDP on 2 — uploading the
-   checkpoints to `<model repo>/<character>/` on a timer while it runs
+7. runs Speaker Inversion training in this process, uploading the checkpoints to
+   `<model repo>/<character>/` on a timer while it runs
 8. optionally continues from a checkpoint a previous run left in that model repo
 
 Every knob lives in the **CONFIG** block below: paths, HF repos, convert args, train args.
@@ -31,6 +31,13 @@ Intended runtime: **GPU (T4)**. Set `UPDATE_DATASET` / `SYNC_CKPT` to False for 
 Usage:
     python speaker_inversion_example/train_speaker_inversion.py        # every step, in order
     python speaker_inversion_example/train_speaker_inversion.py 4 7 8  # just those steps
+
+Multi-GPU: the launcher decides the process count, not this script. Do the setup once, then
+launch step 8 with one process per GPU — train.py reads the RANK / LOCAL_RANK / WORLD_SIZE that
+`accelerate launch` and `torchrun` set:
+
+    python speaker_inversion_example/train_speaker_inversion.py 1 2 3 4 5 6 7
+    accelerate launch --num_processes 2 speaker_inversion_example/train_speaker_inversion.py 8
 
 Mirrors `train_speaker_inversion.ipynb`, one section per cell group, and consumes the
 `results/<character>/*.jsonl` segments that `speaker-inversion-dataset/vad_asr.ipynb` produces.
@@ -100,7 +107,7 @@ TRAIN_SAVE_EVERY  = 250
 TRAIN_LOG_EVERY   = 20
 TRAIN_NUM_WORKERS = 2
 TRAIN_PRECISION   = "fp16"      # T4 (sm_75) has no bf16: train.py warns and falls back to fp32
-TRAIN_NPROC       = 1           # 0 = auto (1 process per visible GPU), 1 = force single process
+# DDP is the launcher's decision, not a knob here: see the `accelerate launch` line in the docstring.
 
 # ---- derived (do not edit) ----------------------------------------------
 EXAMPLE     = REPO_DIR / "speaker_inversion_example"
@@ -142,6 +149,11 @@ def run(*args, cwd=None, check=True):
     returncode = proc.wait()
     if check and returncode:
         raise subprocess.CalledProcessError(returncode, cmd)
+
+
+def dist_env():
+    """RANK / WORLD_SIZE as the launcher set them — train.py reads the very same variables."""
+    return int(os.environ.get("RANK", "0")), int(os.environ.get("WORLD_SIZE", "1"))
 
 
 def hf_token():
@@ -406,10 +418,10 @@ def step_verify_and_upload():
 #
 # Three things worth knowing:
 #
-# - **DDP.** With more than one GPU the run is forked through `accelerate`'s `notebook_launcher`,
-#   which sets the `RANK` / `LOCAL_RANK` / `WORLD_SIZE` that `train.py` reads; with one GPU the
-#   entry function is simply called in this process. `batch_size` is per process, so 2 GPUs
-#   doubles the effective batch.
+# - **DDP.** The launcher owns it: `accelerate launch --num_processes 2 <this script> 8` (or
+#   `torchrun --nproc_per_node 2`) starts one process per GPU and sets the `RANK` / `LOCAL_RANK` /
+#   `WORLD_SIZE` that `train.py` reads, and this script simply runs train.py in each of them.
+#   `batch_size` is per process, so 2 GPUs doubles the effective batch.
 # - **Precision.** T4 (sm_75) has no bf16 support, so `train.py` prints a warning and falls back
 #   to fp32 by itself. Set `TRAIN_PRECISION = "fp32"` to skip the warning.
 # - **Resuming.** `CONTINUE_FROM` warm-starts the embedding from a checkpoint of an earlier run
@@ -457,55 +469,45 @@ def sync_while_training(stop):
     train.py has no upload hook, so watch the output directory instead: the snapshots are a
     few KB each and `hf upload` skips files it already has, so re-uploading the whole
     directory on a timer is cheaper than tracking what changed — and it is what survives a
-    recycled runtime mid-run. The upload runs here, off the main thread, because the launcher
-    needs the main thread for its signal handlers.
+    recycled runtime mid-run. The upload runs on its own thread because this thread spends the
+    whole run inside train.py.
     """
     while not stop.wait(SYNC_EVERY):
         sync_output()
 
 
-def train_entry(argv):
-    """train.py's CLI entry point, in this process: the launcher has set RANK / WORLD_SIZE.
-
-    Module-level, not nested in step_train(), because the launcher pickles it into the child
-    processes it spawns for DDP.
-    """
-    sys.argv = ["train.py", *[str(a) for a in argv]]
-    sys.path.insert(0, str(REPO_DIR))
-    os.chdir(REPO_DIR)
-    import train
-
-    train.main()
-
-
 def step_train():
+    """Run train.py in this process.
+
+    No Accelerator and no launcher here on purpose: the process count belongs to
+    `accelerate launch` / `torchrun`, which have already set RANK / LOCAL_RANK / WORLD_SIZE, and
+    train.py calls init_process_group itself from those.
+    """
     import torch
 
     argv = train_args()
-
-    n_gpu = torch.cuda.device_count()
-    nproc = TRAIN_NPROC or n_gpu
-    if nproc > 1:
-        print(f"DDP over {nproc} GPU(s); batch_size={TRAIN_BATCH_SIZE} is per process "
-              f"-> global batch {TRAIN_BATCH_SIZE * nproc}")
+    rank, world_size = dist_env()
+    if world_size > 1:
+        print(f"DDP rank {rank}/{world_size}; batch_size={TRAIN_BATCH_SIZE} is per process "
+              f"-> global batch {TRAIN_BATCH_SIZE * world_size}")
     else:
-        print(f"single process ({n_gpu} GPU visible)")
+        print(f"single process ({torch.cuda.device_count()} GPU visible)")
 
-    # Accelerator is imported but deliberately never built here: an AcceleratorState that already
-    # exists makes notebook_launcher refuse to fork, and train.py calls init_process_group itself.
-    from accelerate import notebook_launcher  # noqa: F401
-
+    # Only rank 0 uploads: the other ranks are training on the same output directory.
     stop = threading.Event()
-    if SYNC_CKPT and HF_MODEL_REPO:
+    if SYNC_CKPT and HF_MODEL_REPO and rank == 0:
         threading.Thread(target=sync_while_training, args=(stop,), daemon=True).start()
     try:
-        if nproc > 1:
-            notebook_launcher(train_entry, args=(argv,), num_processes=nproc)
-        else:
-            train_entry(argv)
+        sys.argv = ["train.py", *[str(a) for a in argv]]
+        sys.path.insert(0, str(REPO_DIR))
+        os.chdir(REPO_DIR)
+        import train
+
+        train.main()
     finally:
         stop.set()
-        sync_output()
+        if rank == 0:
+            sync_output()
 
 
 # ===========================================================================
@@ -542,9 +544,15 @@ def main():
         print(f"{label:<10} {value}")
     print(f"{'model repo':<10} {MODEL_REPO}")
 
+    rank, world_size = dist_env()
     selected = [s for s in sys.argv[1:] if s.strip().isdigit()]
     todo = [(n, f) for n, f in STEPS if not selected or n.split(".")[0] in selected]
     for label, step in todo:
+        # Every rank of a DDP launch runs this script from the top, so only rank 0 may apt-get,
+        # clone, download and upload these directories; the other ranks go straight to training.
+        if rank and world_size > 1 and step is not step_train:
+            print(f"[rank {rank}] {label} — left to rank 0")
+            continue
         print(f"\n{'=' * 70}\n{label}\n{'=' * 70}", flush=True)
         step()
 
