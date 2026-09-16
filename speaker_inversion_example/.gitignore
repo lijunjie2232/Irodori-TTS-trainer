@@ -1,7 +1,10 @@
-# Generated artifacts from this example workspace - not meant to be committed.
+# Generated artifacts from this example workspace - not meant to be committed. 
 data/*
 outputs/
 *.wav
+
+# Dump produced when mirroring train_speaker_inversion.ipynb to its .py twin.
+_nb_dump.txt
 
 # Keep the templates themselves even though the rules above are broad.
 !data/manifest.example.jsonl
