@@ -9,7 +9,7 @@ base model. The base model never changes; only a `(16, 768)` token table is lear
 What this script does, in order:
 
 1. installs the system deps (ffmpeg) and installs the Python env with `uv pip install --system`
-   (`.[cu128]`, T4-friendly)
+   (`.[cu130]`, matching Colab's CUDA 13.0 stack)
 2. clones [Irodori-TTS-trainer](https://github.com/lijunjie2232/Irodori-TTS-trainer)
 3. downloads the dataset, the base checkpoint and this character's previous checkpoints
 4. unpacks `latents.tar` — the Hub copy of `latents/` is one tar, because a dataset repo may
@@ -26,7 +26,7 @@ What this script does, in order:
 Every knob lives in the **CONFIG** block below: paths, HF repos, convert args, train args.
 Nothing else needs editing.
 
-Intended runtime: **GPU (T4)**. Set `UPDATE_DATASET` / `SYNC_CKPT` to False for a read-only run.
+Intended runtime: **GPU (L4, 24 GB)**. Set `UPDATE_DATASET` / `SYNC_CKPT` to False for a read-only run.
 
 Usage:
     python speaker_inversion_example/train_speaker_inversion.py        # every step, in order
@@ -61,7 +61,7 @@ REPO_BRANCH = "main"
 # The notebook hardcodes the Colab path; here it is overridable so the script can also run from
 # an existing checkout: REPO_DIR=/path/to/repo python .../train_speaker_inversion.py
 REPO_DIR    = Path(os.environ.get("REPO_DIR") or "/content/Irodori-TTS-trainer")
-UV_EXTRA    = "cu128"        # T4 is sm_75, covered by the cu128 wheels
+UV_EXTRA    = "cu130"        # matches Colab's pre-installed CUDA 13.0 PyTorch stack (L4 is sm_89)
 
 # ---- character -----------------------------------------------------------
 CHARACTER = "koyori"         # subdirectory under the dataset root
@@ -95,19 +95,20 @@ CONVERT_MIN_SECONDS  = 1.0
 CONVERT_MAX_SECONDS  = 30.0     # keep <= max_latent_steps / LATENT_FPS of the training config
 CONVERT_NORMALIZE_DB = -16.0
 CONVERT_DEVICE       = "cuda"
-CONVERT_PREFETCH     = 4        # ffmpeg cuts to run ahead of the GPU encode (1 = serial)
+CONVERT_PREFETCH     = 8        # ffmpeg cuts to run ahead of the GPU encode (1 = serial; L4 Colab has 12 vCPUs)
 CONVERT_OVERWRITE    = False    # True -> re-encode everything instead of reusing by ASR text
 SKIP_CONVERT         = True     # True -> no encoding: unpack the Hub copy, verify it, train
 
 # ---- train args (train.py; these override configs/speaker_inversion.yaml) --
-TRAIN_BATCH_SIZE  = 16          # PER PROCESS, so x2 on a 2-GPU machine
-TRAIN_GRAD_ACCUM  = 1
-TRAIN_MAX_STEPS   = 3000
-TRAIN_LR          = 0.01        # high on purpose: only 16x768 params are trainable
-TRAIN_SAVE_EVERY  = 250
-TRAIN_LOG_EVERY   = 20
-TRAIN_NUM_WORKERS = 2
-TRAIN_PRECISION   = "bf16"      # T4 (sm_75) has no bf16; train.py supports fp32 / bf16 only
+TRAIN_BATCH_SIZE         = 16     # PER PROCESS (x2 on 2 GPUs); fits easily in L4 24 GB without grad ckpt
+TRAIN_GRAD_ACCUM         = 1
+TRAIN_MAX_STEPS          = 3000
+TRAIN_LR                 = 0.01   # high on purpose: only 16x768 params are trainable
+TRAIN_SAVE_EVERY         = 250
+TRAIN_LOG_EVERY          = 20
+TRAIN_NUM_WORKERS        = 4      # L4 Colab has 12 vCPUs
+TRAIN_PRECISION          = "bf16" # L4 (sm_89) supports native bf16 + tf32
+TRAIN_GRAD_CHECKPOINTING = False  # False is ~25-30% faster on L4 24 GB; set True if raising batch_size >= 32
 # DDP is the launcher's decision, not a knob here: see the `accelerate launch` line in the docstring.
 
 # ---- derived (do not edit) ----------------------------------------------
@@ -163,27 +164,44 @@ def dist_env():
     return int(os.environ.get("RANK", "0")), int(os.environ.get("WORLD_SIZE", "1"))
 
 
+def _cached_hf_token():
+    """Token saved by `hf auth login` / `huggingface-cli login`, if any."""
+    hf_home = Path(os.environ.get("HF_HOME") or Path.home() / ".cache" / "huggingface")
+    token_path = Path(os.environ.get("HF_TOKEN_PATH") or hf_home / "token")
+    if token_path.is_file():
+        return token_path.read_text(encoding="utf-8").strip()
+    return ""
+
+
 def hf_token():
-    """Write token: the HF_TOKEN variable if it is set, else the Colab secret of that name."""
+    """Write token: CONFIG HF_TOKEN, cached `hf auth login` token, or Colab secret (in-kernel)."""
     if HF_TOKEN:
-        return HF_TOKEN
+        return HF_TOKEN, "the HF_TOKEN variable"
+    cached = _cached_hf_token()
+    if cached:
+        return cached, "the cached HuggingFace login token"
     try:
         from google.colab import userdata
-    except ImportError as exc:
+        token = userdata.get(HF_TOKEN_SECRET)
+    except (ImportError, AttributeError) as exc:
         raise RuntimeError(
-            "HF_TOKEN is not set in CONFIG or the environment, and google.colab is unavailable."
+            "HF_TOKEN is not set and Colab secrets (google.colab.userdata) only work inside a "
+            "notebook kernel, not a standalone Python process. Supply a token via:\n"
+            "  - env var:    HF_TOKEN=hf_... python train_speaker_inversion.py\n"
+            "  - CLI login:  hf auth login\n"
+            "  - CONFIG:     set HF_TOKEN = 'hf_...' near the top of this script\n"
+            "  - Colab cell: os.environ['HF_TOKEN'] = userdata.get('HF_TOKEN') before !python ..."
         ) from exc
-    token = userdata.get(HF_TOKEN_SECRET)
     if not token:
         raise RuntimeError(f"Colab secret {HF_TOKEN_SECRET!r} is missing or empty.")
-    return token
+    return token, f"the {HF_TOKEN_SECRET} secret"
 
 
 def use_hf_token():
     """Export HF_TOKEN for the `hf` CLI, which reads the environment and not this variable."""
     if not os.environ.get("HF_TOKEN"):
-        os.environ["HF_TOKEN"] = hf_token()
-        source = "the HF_TOKEN variable" if HF_TOKEN else f"the {HF_TOKEN_SECRET} secret"
+        token, source = hf_token()
+        os.environ["HF_TOKEN"] = token
         print(f"[hf] token from {source}")
 
 
@@ -260,12 +278,20 @@ def step_clone():
 #
 # Installed into the **running interpreter** (`uv pip install --system`) rather than a
 # `<repo>/.venv`, because section 8 trains in this process and has to see exactly what
-# `train.py` sees. `torch` / `torchaudio` resolve from the `pytorch-cu128` index and `dacvae`
-# from git — both declared in the repo's `pyproject.toml`, which `uv` honours when it installs
-# `-e .`.
+# `train.py` sees. `torch` / `torchaudio` / `torchcodec` resolve from the `pytorch-cu130` index
+# (reusing Colab's pre-installed CUDA 13.0 wheels) and `dacvae` from git — both declared in the
+# repo's `pyproject.toml`, which `uv` honours when it installs `-e .`.
 # ===========================================================================
 def step_python_env():
     run("uv", "pip", "install", "--system", "--break-system-packages", "-e", f".[{UV_EXTRA}]")
+    # If a pre-installed torchvision is ABI-mismatched with the installed torch (e.g. when using
+    # cu128 on a cu130 Colab runtime), remove it so `transformers` does not crash on torchvision::nms.
+    run(*RUN, "-c",
+        "import subprocess\n"
+        "try:\n"
+        "    import torchvision\n"
+        "except Exception:\n"
+        "    subprocess.run(['uv', 'pip', 'uninstall', '--system', '--break-system-packages', 'torchvision'])")
     run(*RUN, "-c",
         "import torch; print('torch', torch.__version__, '| cuda', torch.version.cuda,"
         " '| available', torch.cuda.is_available(), '|', torch.cuda.device_count(), 'GPU(s)')")
@@ -443,8 +469,9 @@ def step_verify_and_upload():
 #   `torchrun --nproc_per_node 2`) starts one process per GPU and sets the `RANK` / `LOCAL_RANK` /
 #   `WORLD_SIZE` that `train.py` reads, and this script simply runs train.py in each of them.
 #   `batch_size` is per process, so 2 GPUs doubles the effective batch.
-# - **Precision.** T4 (sm_75) has no bf16 support, so `train.py` prints a warning and falls back
-#   to fp32 by itself. Set `TRAIN_PRECISION = "fp32"` to skip the warning.
+# - **Precision & VRAM.** L4 (sm_89, 24 GB) supports native bf16 + tf32 and has enough VRAM to
+#   run with `TRAIN_GRAD_CHECKPOINTING = False` at `batch_size = 16` (~25-30% faster). Set it to
+#   `True` if you raise `TRAIN_BATCH_SIZE` to 32+ or run on a 16 GB T4.
 # - **Resuming.** `CONTINUE_FROM` warm-starts the embedding from a checkpoint of an earlier run
 #   (e.g. `"checkpoint_001500.speaker.safetensors"`, downloaded from `HF_MODEL_REPO`). Only the
 #   embedding carries over — step counter, optimizer state and LR schedule restart.
@@ -464,6 +491,7 @@ def train_args():
         "--log-every", TRAIN_LOG_EVERY,
         "--num-workers", TRAIN_NUM_WORKERS,
         "--precision", TRAIN_PRECISION,
+        "--gradient-checkpointing" if TRAIN_GRAD_CHECKPOINTING else "--no-gradient-checkpointing",
     ]
 
     if CONTINUE_FROM:
