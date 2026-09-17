@@ -73,9 +73,10 @@ HF_TOKEN_SECRET = "HF_TOKEN"    # Colab secret name, read when HF_TOKEN is ""
 # ---- dataset (HuggingFace) ----------------------------------------------
 HF_DATASET_REPO = "l2533584225/Inversion-speaker-dataset"
 UPDATE_DATASET  = True         # True -> upload <dataset>/<character>/converted to HF
-# <character>/* = source audio, results/<character>/* = the VAD+ASR segments,
-# <character>/converted/* = manifest.jsonl + latents.tar of the last conversion
-DATASET_INCLUDE = [f"{CHARACTER}/*", f"results/{CHARACTER}/*", f"{CHARACTER}/converted/*"]
+# Leave empty to choose automatically from SKIP_CONVERT:
+#   SKIP_CONVERT=True  -> only <character>/converted/* (skips ~4 GB of source mp3s)
+#   SKIP_CONVERT=False -> source audio + VAD/ASR segments + previous converted/*
+DATASET_INCLUDE = []
 
 # ---- models --------------------------------------------------------------
 BASE_MODEL_REPO = "Aratako/Irodori-TTS-v4.1-Small"
@@ -106,10 +107,16 @@ TRAIN_LR          = 0.01        # high on purpose: only 16x768 params are traina
 TRAIN_SAVE_EVERY  = 250
 TRAIN_LOG_EVERY   = 20
 TRAIN_NUM_WORKERS = 2
-TRAIN_PRECISION   = "fp16"      # T4 (sm_75) has no bf16: train.py warns and falls back to fp32
+TRAIN_PRECISION   = "bf16"      # T4 (sm_75) has no bf16; train.py supports fp32 / bf16 only
 # DDP is the launcher's decision, not a knob here: see the `accelerate launch` line in the docstring.
 
 # ---- derived (do not edit) ----------------------------------------------
+if not DATASET_INCLUDE:
+    DATASET_INCLUDE = (
+        [f"{CHARACTER}/converted/*"]
+        if SKIP_CONVERT
+        else [f"{CHARACTER}/*", f"results/{CHARACTER}/*", f"{CHARACTER}/converted/*"]
+    )
 EXAMPLE     = REPO_DIR / "speaker_inversion_example"
 DATASET     = EXAMPLE / "data" / "speaker-inversion-dataset"
 CONVERT     = DATASET / CHARACTER / "converted"
@@ -160,9 +167,16 @@ def hf_token():
     """Write token: the HF_TOKEN variable if it is set, else the Colab secret of that name."""
     if HF_TOKEN:
         return HF_TOKEN
-    from google.colab import userdata
-
-    return userdata.get(HF_TOKEN_SECRET)
+    try:
+        from google.colab import userdata
+    except ImportError as exc:
+        raise RuntimeError(
+            "HF_TOKEN is not set in CONFIG or the environment, and google.colab is unavailable."
+        ) from exc
+    token = userdata.get(HF_TOKEN_SECRET)
+    if not token:
+        raise RuntimeError(f"Colab secret {HF_TOKEN_SECRET!r} is missing or empty.")
+    return token
 
 
 def use_hf_token():
@@ -251,7 +265,7 @@ def step_clone():
 # `-e .`.
 # ===========================================================================
 def step_python_env():
-    run("uv", "pip", "install", "--system", "--break-system-packages", "-e", ".", f"[{UV_EXTRA}]")
+    run("uv", "pip", "install", "--system", "--break-system-packages", "-e", f".[{UV_EXTRA}]")
     run(*RUN, "-c",
         "import torch; print('torch', torch.__version__, '| cuda', torch.version.cuda,"
         " '| available', torch.cuda.is_available(), '|', torch.cuda.device_count(), 'GPU(s)')")
@@ -367,6 +381,13 @@ def step_convert():
 def step_verify_and_upload():
     records = verify_converted()        # runs whether the latents were just encoded or unpacked
     total_frames = sum(r["num_frames"] for r in records)
+    print(f"[verify] {len(records)} samples, {total_frames} frames "
+          f"({total_frames / LATENT_FPS:.2f} s) OK")
+
+    if SKIP_CONVERT:
+        print("SKIP_CONVERT is True — keeping existing convert_report.json and skipping Hub upload.")
+        return
+
     referenced = [MANIFEST.parent / r["latent_path"] for r in records]
 
     # CONVERT_AUDIO_FILTER narrows which source files were used, so mirror it here.
@@ -473,7 +494,10 @@ def sync_while_training(stop):
     whole run inside train.py.
     """
     while not stop.wait(SYNC_EVERY):
-        sync_output()
+        try:
+            sync_output()
+        except Exception as exc:
+            print(f"[sync] warning: periodic upload failed: {exc}", flush=True)
 
 
 def step_train():
@@ -496,6 +520,7 @@ def step_train():
     # Only rank 0 uploads: the other ranks are training on the same output directory.
     stop = threading.Event()
     if SYNC_CKPT and HF_MODEL_REPO and rank == 0:
+        use_hf_token()
         threading.Thread(target=sync_while_training, args=(stop,), daemon=True).start()
     try:
         sys.argv = ["train.py", *[str(a) for a in argv]]
@@ -513,14 +538,20 @@ def step_train():
 # ===========================================================================
 # 9. Outputs
 # ===========================================================================
+def _list_dir(path: Path):
+    for p in sorted(path.iterdir()):
+        kind = "dir " if p.is_dir() else f"{p.stat().st_size:>12,d} B"
+        print(f"  {kind:>14}  {p.name}")
+
+
 def step_outputs():
     final_embed = OUTPUT_DIR / "checkpoint_final.speaker.safetensors"
     assert final_embed.is_file(), f"training produced no embedding at {final_embed}"
 
     print(f"converted -> {CONVERT}")
-    run("ls", "-alh", CONVERT)
+    _list_dir(CONVERT)
     print(f"\nembeddings -> {OUTPUT_DIR}")
-    run("ls", "-alh", OUTPUT_DIR)
+    _list_dir(OUTPUT_DIR)
     if SYNC_CKPT and HF_MODEL_REPO:
         print(f"\nsynced to https://huggingface.co/{HF_MODEL_REPO}/tree/main/{CHARACTER}")
 
